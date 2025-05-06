@@ -1,0 +1,6 @@
+.vscode/
+.cache/
+tasks/mllmteam*
+build*/
+temp/
+.cspell/

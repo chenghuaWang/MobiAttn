@@ -1,0 +1,6 @@
+if (MOBI_ATTN_ARM)
+    add_library(mafa2 INTERFACE)
+    target_link_libraries(mafa2 INTERFACE -fopenmp)
+    target_compile_options(mafa2 INTERFACE ${MOBI_ATTN_ARM_COMPILE_OPTIONS} -fopenmp)
+    target_include_directories(mafa2 INTERFACE ${MOBI_ATTN_INCLUDE_DIR})
+endif (MOBI_ATTN_ARM)

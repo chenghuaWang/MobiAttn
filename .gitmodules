@@ -1,0 +1,9 @@
+[submodule "third_party/kleidiai"]
+	path = third_party/kleidiai
+	url = https://gitlab.arm.com/kleidi/kleidiai
+[submodule "third_party/googletest"]
+	path = third_party/googletest
+	url = https://github.com/google/googletest
+[submodule "third_party/benchmark"]
+	path = third_party/benchmark
+	url = https://github.com/google/benchmark
