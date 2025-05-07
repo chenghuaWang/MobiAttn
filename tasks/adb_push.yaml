@@ -1,5 +1,7 @@
 AdbPushTask:
   files:
-    - "build-android-arm64-v8a/tests/arm_flash_attn_2/mobi_attn_arm_flash_attn_2"
+    - "build-android-arm64-v8a/tests/arm_flash_attn_2/test_mobi_attn_arm_flash_attn_2"
+    - "build-android-arm64-v8a/examples/arm_flash_attn_2/mobi_attn_arm_flash_attn_2"
+    - "build-android-arm64-v8a/benchmark/arm_flash_attn_2/benchmark_mobi_attn_arm_flash_attn_2"
 
   to_path: "/data/local/tmp/mobi_attn/bin/"

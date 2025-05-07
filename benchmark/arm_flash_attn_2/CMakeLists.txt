@@ -1,0 +1,2 @@
+add_executable(benchmark_mobi_attn_arm_flash_attn_2 benchmark.cpp)
+target_link_libraries(benchmark_mobi_attn_arm_flash_attn_2 PRIVATE benchmark::benchmark mafa2)
