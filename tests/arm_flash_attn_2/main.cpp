@@ -301,7 +301,7 @@ class ArmFlashAttn2_GQA_BSHD_FP16_Test : public testing::Test {
   ~ArmFlashAttn2_GQA_BSHD_FP16_Test() override = default;
 
   using FlashAttnOp =
-      FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<4, 4, 16, 8, 2, false>>;
+      FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<4, 4, 32, 8, 2, false>>;
 
   void SetShape(int B, int S_Q, int S_K, int D) {
     B_ = B;
@@ -419,7 +419,7 @@ class ArmFlashAttn2_GQA_BSHD_FP16_Test : public testing::Test {
   int B_;
   int S_Q_;
   int S_K_;
-  int Q_Head_ = 16;
+  int Q_Head_ = 32;
   int KV_Head_ = 8;
   int D_;
 

@@ -35,7 +35,7 @@ static void BSHD_FP16_GQA(benchmark::State& state) {
 
   constexpr int32_t Br = 4;
   constexpr int32_t Bc = 4;
-  constexpr int32_t threads = 2;
+  constexpr int32_t threads = 4;
   constexpr bool high_precession_exp = false;
 
   using FlashAttnOp = FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<

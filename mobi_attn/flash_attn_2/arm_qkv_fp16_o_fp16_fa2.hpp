@@ -19,6 +19,7 @@ limitations under the License.
 #error AArch64, FEAT_FP16 is needed to compile this file. Pls trying to recompile with options: -march=armv8.2-a+fp16+dotprod;-ffast-math
 #else
 
+#include <omp.h>
 #include <cstdint>
 #include <cassert>
 #include <limits>
@@ -69,176 +70,165 @@ struct NEON_FA_2_MHA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL {
     // Loops
     for (int32_t b_idx = 0; b_idx < batch_size; ++b_idx) {
       // FIXME: Make dynamic threads dispatching available in head_size level.
-      for (int32_t h_idx = 0; h_idx < head_size; h_idx += threads) {
-#pragma omp parallel for num_threads(threads) schedule(auto) if (threads > 1)
-        for (int thread_id = 0; thread_id < threads; ++thread_id) {
-          const int32_t this_thread_head = h_idx + thread_id;
+#pragma omp parallel for num_threads(threads) schedule(dynamic, 1) if (threads > 1)
+      for (int32_t h_idx = 0; h_idx < head_size; ++h_idx) {
+        const int32_t thread_id = omp_get_thread_num();
+        const int32_t this_thread_head = h_idx;
 
-          // Loop S_Q
-          for (int t_r_idx = 0; t_r_idx < Tr; ++t_r_idx) {
-            // Init all temps
-            init_temp(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
-                      acc_o_ + thread_id * Br * dim_size, dim_size);
+        // Loop S_Q
+        for (int t_r_idx = 0; t_r_idx < Tr; ++t_r_idx) {
+          // Init all temps
+          init_temp(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
+                    acc_o_ + thread_id * Br * dim_size, dim_size);
 
-            // Loop S_KV
-            for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
-                                      + t_r_idx * Br * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
-                                      + t_c_idx * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
-                                      + t_c_idx * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-              // Q @ K^T
-              mma0(tile_q, tile_k, tile_acc_s, dim_size, head_size * dim_size, t_r_idx, t_c_idx,
-                   seq_size_q, seq_size_k, causal_mask);
-
-              // Softmax
-              softmax(acc_s_ + thread_id * Br * Bc, acc_s_cast_ + thread_id * Br * Bc,
-                      scoremax_ + thread_id * Br, scoremax_prev_ + thread_id * Br,
-                      score_scale_ + thread_id * Br, score_sum_ + thread_id * Br,
-                      logsum_ + thread_id * Br, t_r_idx, t_c_idx, seq_size_q, seq_size_k,
-                      causal_mask);
-
-              // Rescale
-              rescale(acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, t_c_idx, seq_size_q,
-                      seq_size_k, causal_mask);
-
-              // W @ V
-              mma1(acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, head_size, dim_size, t_r_idx,
-                   t_c_idx, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            // Process the last block of KV
-            if (Tc_left) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
-                                      + t_r_idx * Br * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
-                                      + Tc * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
-                                      + Tc * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-
-              // Q @ K^T
-              mma0_pa_n_fixed(Br, Tc_left, tile_q, tile_k, tile_acc_s, dim_size,
-                              head_size * dim_size, t_r_idx, Tc, seq_size_q, seq_size_k,
-                              causal_mask);
-
-              // Softmax
-              softmax_pa_n_fixed(Br, Tc_left, acc_s_ + thread_id * Br * Bc,
-                                 acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
-                                 scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
-                                 score_sum_ + thread_id * Br, logsum_ + thread_id * Br, t_r_idx, Tc,
-                                 seq_size_q, seq_size_k, causal_mask);
-
-              // Rescale
-              rescale_pa_n_fixed(Br, Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size,
-                                 t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // W @ V
-              mma1_pa_n_fixed(Br, Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
-                              head_size, dim_size, t_r_idx, Tc, seq_size_q, seq_size_k,
-                              causal_mask);
-            }
-
-            // Scale acc_o and cast store
-            scale_and_cast_copy(acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
-                                O + b_idx * seq_size_q * head_size * dim_size
+          // Loop S_KV
+          for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
                                     + t_r_idx * Br * head_size * dim_size
-                                    + this_thread_head * dim_size,
-                                t_r_idx, head_size, dim_size);
+                                    + this_thread_head * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
+                                    + t_c_idx * Bc * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
+                                    + t_c_idx * Bc * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+            // Q @ K^T
+            mma0(tile_q, tile_k, tile_acc_s, dim_size, head_size * dim_size, t_r_idx, t_c_idx,
+                 seq_size_q, seq_size_k, causal_mask);
+
+            // Softmax
+            softmax(acc_s_ + thread_id * Br * Bc, acc_s_cast_ + thread_id * Br * Bc,
+                    scoremax_ + thread_id * Br, scoremax_prev_ + thread_id * Br,
+                    score_scale_ + thread_id * Br, score_sum_ + thread_id * Br,
+                    logsum_ + thread_id * Br, t_r_idx, t_c_idx, seq_size_q, seq_size_k,
+                    causal_mask);
+
+            // Rescale
+            rescale(acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, t_c_idx, seq_size_q,
+                    seq_size_k, causal_mask);
+
+            // W @ V
+            mma1(acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, head_size, dim_size, t_r_idx,
+                 t_c_idx, seq_size_q, seq_size_k, causal_mask);
           }
 
-          // Process left Q
-          if (Tr_left) {
-            // Init all temps
-            init_temp(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
-                      acc_o_ + thread_id * Br * dim_size, dim_size);
+          // Process the last block of KV
+          if (Tc_left) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
+                                    + t_r_idx * Br * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
+                                    + Tc * Bc * head_size * dim_size + this_thread_head * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
+                                    + Tc * Bc * head_size * dim_size + this_thread_head * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
 
-            // Loop S_KV
-            for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
-                                      + Tr * Br * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
-                                      + t_c_idx * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
-                                      + t_c_idx * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-              // Q @ K^T
-              mma0_pa_n_fixed(Tr_left, Bc, tile_q, tile_k, tile_acc_s, dim_size,
-                              head_size * dim_size, Tr, t_c_idx, seq_size_q, seq_size_k,
-                              causal_mask);
+            // Q @ K^T
+            mma0_pa_n_fixed(Br, Tc_left, tile_q, tile_k, tile_acc_s, dim_size, head_size * dim_size,
+                            t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
 
-              // Softmax
-              softmax_pa_n_fixed(Tr_left, Bc, acc_s_ + thread_id * Br * Bc,
-                                 acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
-                                 scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
-                                 score_sum_ + thread_id * Br, logsum_ + thread_id * Br, Tr, t_c_idx,
-                                 seq_size_q, seq_size_k, causal_mask);
+            // Softmax
+            softmax_pa_n_fixed(Br, Tc_left, acc_s_ + thread_id * Br * Bc,
+                               acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
+                               scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
+                               score_sum_ + thread_id * Br, logsum_ + thread_id * Br, t_r_idx, Tc,
+                               seq_size_q, seq_size_k, causal_mask);
 
-              // Rescale
-              rescale_pa_n_fixed(Tr_left, Bc, acc_o, score_scale_ + thread_id * Br, dim_size, Tr,
-                                 t_c_idx, seq_size_q, seq_size_k, causal_mask);
+            // Rescale
+            rescale_pa_n_fixed(Br, Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx,
+                               Tc, seq_size_q, seq_size_k, causal_mask);
 
-              // W @ V
-              mma1_pa_n_fixed(Tr_left, Bc, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
-                              head_size, dim_size, Tr, t_c_idx, seq_size_q, seq_size_k,
-                              causal_mask);
-            }
-
-            // Process the last block of KV
-            if (Tc_left) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
-                                      + Tr * Br * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
-                                      + Tc * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
-                                      + Tc * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-
-              // Q @ K^T
-              mma0_pa_n_fixed(Tr_left, Tc_left, tile_q, tile_k, tile_acc_s, dim_size,
-                              head_size * dim_size, Tr, Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // Softmax
-              softmax_pa_n_fixed(Tr_left, Tc_left, acc_s_ + thread_id * Br * Bc,
-                                 acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
-                                 scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
-                                 score_sum_ + thread_id * Br, logsum_ + thread_id * Br, Tr, Tc,
-                                 seq_size_q, seq_size_k, causal_mask);
-
-              // Rescale
-              rescale_pa_n_fixed(Tr_left, Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size,
-                                 Tr, Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // W @ V
-              mma1_pa_n_fixed(Tr_left, Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
-                              head_size, dim_size, Tr, Tc, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            // Scale acc_o and cast store
-            scale_and_cast_copy_pa_n_fixed(
-                Tr_left, acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
-                O + b_idx * seq_size_q * head_size * dim_size + Tr * Br * head_size * dim_size
-                    + this_thread_head * dim_size,
-                Tr, head_size, dim_size);
+            // W @ V
+            mma1_pa_n_fixed(Br, Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
+                            head_size, dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
           }
+
+          // Scale acc_o and cast store
+          scale_and_cast_copy(acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
+                              O + b_idx * seq_size_q * head_size * dim_size
+                                  + t_r_idx * Br * head_size * dim_size
+                                  + this_thread_head * dim_size,
+                              t_r_idx, head_size, dim_size);
+        }
+
+        // Process left Q
+        if (Tr_left) {
+          // Init all temps
+          init_temp(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
+                    acc_o_ + thread_id * Br * dim_size, dim_size);
+
+          // Loop S_KV
+          for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
+                                    + Tr * Br * head_size * dim_size + this_thread_head * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
+                                    + t_c_idx * Bc * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
+                                    + t_c_idx * Bc * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+            // Q @ K^T
+            mma0_pa_n_fixed(Tr_left, Bc, tile_q, tile_k, tile_acc_s, dim_size, head_size * dim_size,
+                            Tr, t_c_idx, seq_size_q, seq_size_k, causal_mask);
+
+            // Softmax
+            softmax_pa_n_fixed(Tr_left, Bc, acc_s_ + thread_id * Br * Bc,
+                               acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
+                               scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
+                               score_sum_ + thread_id * Br, logsum_ + thread_id * Br, Tr, t_c_idx,
+                               seq_size_q, seq_size_k, causal_mask);
+
+            // Rescale
+            rescale_pa_n_fixed(Tr_left, Bc, acc_o, score_scale_ + thread_id * Br, dim_size, Tr,
+                               t_c_idx, seq_size_q, seq_size_k, causal_mask);
+
+            // W @ V
+            mma1_pa_n_fixed(Tr_left, Bc, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
+                            head_size, dim_size, Tr, t_c_idx, seq_size_q, seq_size_k, causal_mask);
+          }
+
+          // Process the last block of KV
+          if (Tc_left) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
+                                    + Tr * Br * head_size * dim_size + this_thread_head * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
+                                    + Tc * Bc * head_size * dim_size + this_thread_head * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
+                                    + Tc * Bc * head_size * dim_size + this_thread_head * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+
+            // Q @ K^T
+            mma0_pa_n_fixed(Tr_left, Tc_left, tile_q, tile_k, tile_acc_s, dim_size,
+                            head_size * dim_size, Tr, Tc, seq_size_q, seq_size_k, causal_mask);
+
+            // Softmax
+            softmax_pa_n_fixed(Tr_left, Tc_left, acc_s_ + thread_id * Br * Bc,
+                               acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
+                               scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
+                               score_sum_ + thread_id * Br, logsum_ + thread_id * Br, Tr, Tc,
+                               seq_size_q, seq_size_k, causal_mask);
+
+            // Rescale
+            rescale_pa_n_fixed(Tr_left, Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size, Tr,
+                               Tc, seq_size_q, seq_size_k, causal_mask);
+
+            // W @ V
+            mma1_pa_n_fixed(Tr_left, Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
+                            head_size, dim_size, Tr, Tc, seq_size_q, seq_size_k, causal_mask);
+          }
+
+          // Scale acc_o and cast store
+          scale_and_cast_copy_pa_n_fixed(
+              Tr_left, acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
+              O + b_idx * seq_size_q * head_size * dim_size + Tr * Br * head_size * dim_size
+                  + this_thread_head * dim_size,
+              Tr, head_size, dim_size);
         }
       }
     }
@@ -260,90 +250,87 @@ struct NEON_FA_2_MHA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL {
     // Loops
     for (int32_t b_idx = 0; b_idx < batch_size; ++b_idx) {
       // FIXME: Make dynamic threads dispatching available in head_size level.
-      for (int32_t h_idx = 0; h_idx < head_size; h_idx += threads) {
-#pragma omp parallel for num_threads(threads) schedule(auto) if (threads > 1)
-        for (int thread_id = 0; thread_id < threads; ++thread_id) {
-          const int32_t this_thread_head = h_idx + thread_id;
+#pragma omp parallel for num_threads(threads) schedule(dynamic, 1) if (threads > 1)
+      for (int32_t h_idx = 0; h_idx < head_size; ++h_idx) {
+        const int32_t thread_id = omp_get_thread_num();
+        const int32_t this_thread_head = h_idx;
 
-          // Loop Q
-          for (int t_r_idx = 0; t_r_idx < Tr; ++t_r_idx) {
-            // Init all temps
-            init_temp_d(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
-                        acc_o_ + thread_id * Br * dim_size, dim_size);
+        // Loop Q
+        for (int t_r_idx = 0; t_r_idx < Tr; ++t_r_idx) {
+          // Init all temps
+          init_temp_d(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
+                      acc_o_ + thread_id * Br * dim_size, dim_size);
 
-            // Loop KV
-            for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
-                                      + t_r_idx * 1 * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
-                                      + t_c_idx * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
-                                      + t_c_idx * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * 1 * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-              // Q @ K^T
-              mma0_d(tile_q, tile_k, tile_acc_s, dim_size, head_size * dim_size, t_r_idx, t_c_idx,
-                     seq_size_q, seq_size_k, causal_mask);
+          // Loop KV
+          for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
+                                    + t_r_idx * 1 * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
+                                    + t_c_idx * Bc * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
+                                    + t_c_idx * Bc * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * 1 * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+            // Q @ K^T
+            mma0_d(tile_q, tile_k, tile_acc_s, dim_size, head_size * dim_size, t_r_idx, t_c_idx,
+                   seq_size_q, seq_size_k, causal_mask);
 
-              // Softmax
-              softmax_d(acc_s_ + thread_id * Br * Bc, acc_s_cast_ + thread_id * Br * Bc,
-                        scoremax_ + thread_id * Br, scoremax_prev_ + thread_id * Br,
-                        score_scale_ + thread_id * Br, score_sum_ + thread_id * Br,
-                        logsum_ + thread_id * Br, t_r_idx, t_c_idx, seq_size_q, seq_size_k,
-                        causal_mask);
+            // Softmax
+            softmax_d(acc_s_ + thread_id * Br * Bc, acc_s_cast_ + thread_id * Br * Bc,
+                      scoremax_ + thread_id * Br, scoremax_prev_ + thread_id * Br,
+                      score_scale_ + thread_id * Br, score_sum_ + thread_id * Br,
+                      logsum_ + thread_id * Br, t_r_idx, t_c_idx, seq_size_q, seq_size_k,
+                      causal_mask);
 
-              // Rescale
-              rescale_d(acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, t_c_idx,
-                        seq_size_q, seq_size_k, causal_mask);
+            // Rescale
+            rescale_d(acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, t_c_idx, seq_size_q,
+                      seq_size_k, causal_mask);
 
-              // W @ V
-              mma1_d(acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, head_size, dim_size, t_r_idx,
-                     t_c_idx, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            if (Tc_left) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
-                                      + t_r_idx * Br * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
-                                      + Tc * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
-                                      + Tc * Bc * head_size * dim_size
-                                      + this_thread_head * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-
-              // Q @ K^T
-              mma0_d_n_fixed(Tc_left, tile_q, tile_k, tile_acc_s, dim_size, head_size * dim_size,
-                             t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // Softmax
-              softmax_d_n_fixed(Tc_left, acc_s_ + thread_id * Br * Bc,
-                                acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
-                                scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
-                                score_sum_ + thread_id * Br, logsum_ + thread_id * Br, t_r_idx, Tc,
-                                seq_size_q, seq_size_k, causal_mask);
-
-              // Rescale
-              rescale_d_n_fixed(Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx,
-                                Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // W @ V
-              mma1_d_n_fixed(Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, head_size,
-                             dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            // Scale acc_o and cast store
-            scale_and_cast_copy_d(acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
-                                  O + b_idx * seq_size_q * head_size * dim_size
-                                      + t_r_idx * 1 * head_size * dim_size
-                                      + this_thread_head * dim_size,
-                                  t_r_idx, head_size, dim_size);
+            // W @ V
+            mma1_d(acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, head_size, dim_size, t_r_idx,
+                   t_c_idx, seq_size_q, seq_size_k, causal_mask);
           }
+
+          if (Tc_left) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * head_size * dim_size
+                                    + t_r_idx * Br * head_size * dim_size
+                                    + this_thread_head * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * head_size * dim_size
+                                    + Tc * Bc * head_size * dim_size + this_thread_head * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * head_size * dim_size
+                                    + Tc * Bc * head_size * dim_size + this_thread_head * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+
+            // Q @ K^T
+            mma0_d_n_fixed(Tc_left, tile_q, tile_k, tile_acc_s, dim_size, head_size * dim_size,
+                           t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
+
+            // Softmax
+            softmax_d_n_fixed(Tc_left, acc_s_ + thread_id * Br * Bc,
+                              acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
+                              scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
+                              score_sum_ + thread_id * Br, logsum_ + thread_id * Br, t_r_idx, Tc,
+                              seq_size_q, seq_size_k, causal_mask);
+
+            // Rescale
+            rescale_d_n_fixed(Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, Tc,
+                              seq_size_q, seq_size_k, causal_mask);
+
+            // W @ V
+            mma1_d_n_fixed(Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, head_size,
+                           dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
+          }
+
+          // Scale acc_o and cast store
+          scale_and_cast_copy_d(acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
+                                O + b_idx * seq_size_q * head_size * dim_size
+                                    + t_r_idx * 1 * head_size * dim_size
+                                    + this_thread_head * dim_size,
+                                t_r_idx, head_size, dim_size);
         }
       }
     }
@@ -1463,173 +1450,168 @@ struct NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL {
     // Loops
     for (int32_t b_idx = 0; b_idx < batch_size; ++b_idx) {
       // FIXME: Make dynamic threads dispatching available in head_size level.
-      for (int32_t h_idx = 0; h_idx < head_size; h_idx += threads) {
-#pragma omp parallel for num_threads(threads) schedule(auto) if (threads > 1)
-        for (int thread_id = 0; thread_id < threads; ++thread_id) {
-          const int32_t this_thread_head = h_idx + thread_id;
-          const int32_t this_thread_head_q = this_thread_head;
-          const int32_t this_thread_head_kv = kv_head_index(this_thread_head_q);
+#pragma omp parallel for num_threads(threads) schedule(dynamic, 1) if (threads > 1)
+      for (int32_t h_idx = 0; h_idx < head_size; ++h_idx) {
+        const int32_t thread_id = omp_get_thread_num();
+        const int32_t this_thread_head = h_idx;
+        const int32_t this_thread_head_q = this_thread_head;
+        const int32_t this_thread_head_kv = kv_head_index(this_thread_head_q);
 
-          // Loop S_Q
-          for (int t_r_idx = 0; t_r_idx < Tr; ++t_r_idx) {
-            // Init all temps
-            init_temp(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
-                      acc_o_ + thread_id * Br * dim_size, dim_size);
+        // Loop S_Q
+        for (int t_r_idx = 0; t_r_idx < Tr; ++t_r_idx) {
+          // Init all temps
+          init_temp(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
+                    acc_o_ + thread_id * Br * dim_size, dim_size);
 
-            // Loop S_KV
-            for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
-                                      + t_r_idx * Br * Q_Head * dim_size
-                                      + this_thread_head_q * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
-                                      + t_c_idx * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
-                                      + t_c_idx * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-              // Q @ K^T
-              mma0(tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size, KV_Head * dim_size,
-                   t_r_idx, t_c_idx, seq_size_q, seq_size_k, causal_mask);
+          // Loop S_KV
+          for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
+                                    + t_r_idx * Br * Q_Head * dim_size
+                                    + this_thread_head_q * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
+                                    + t_c_idx * Bc * KV_Head * dim_size
+                                    + this_thread_head_kv * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
+                                    + t_c_idx * Bc * KV_Head * dim_size
+                                    + this_thread_head_kv * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+            // Q @ K^T
+            mma0(tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size, KV_Head * dim_size,
+                 t_r_idx, t_c_idx, seq_size_q, seq_size_k, causal_mask);
 
-              // Softmax
-              softmax(acc_s_ + thread_id * Br * Bc, acc_s_cast_ + thread_id * Br * Bc,
-                      scoremax_ + thread_id * Br, scoremax_prev_ + thread_id * Br,
-                      score_scale_ + thread_id * Br, score_sum_ + thread_id * Br,
-                      logsum_ + thread_id * Br, t_r_idx, t_c_idx, seq_size_q, seq_size_k,
-                      causal_mask);
+            // Softmax
+            softmax(acc_s_ + thread_id * Br * Bc, acc_s_cast_ + thread_id * Br * Bc,
+                    scoremax_ + thread_id * Br, scoremax_prev_ + thread_id * Br,
+                    score_scale_ + thread_id * Br, score_sum_ + thread_id * Br,
+                    logsum_ + thread_id * Br, t_r_idx, t_c_idx, seq_size_q, seq_size_k,
+                    causal_mask);
 
-              // Rescale
-              rescale(acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, t_c_idx, seq_size_q,
-                      seq_size_k, causal_mask);
+            // Rescale
+            rescale(acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, t_c_idx, seq_size_q,
+                    seq_size_k, causal_mask);
 
-              // W @ V
-              mma1(acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, KV_Head, dim_size, t_r_idx,
-                   t_c_idx, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            // Process the last block of KV
-            if (Tc_left) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
-                                      + t_r_idx * Br * Q_Head * dim_size
-                                      + this_thread_head_q * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
-                                      + Tc * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
-                                      + Tc * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-
-              // Q @ K^T
-              mma0_pa_n_fixed(Br, Tc_left, tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size,
-                              KV_Head * dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // Softmax
-              softmax_pa_n_fixed(Br, Tc_left, acc_s_ + thread_id * Br * Bc,
-                                 acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
-                                 scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
-                                 score_sum_ + thread_id * Br, logsum_ + thread_id * Br, t_r_idx, Tc,
-                                 seq_size_q, seq_size_k, causal_mask);
-
-              // Rescale
-              rescale_pa_n_fixed(Br, Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size,
-                                 t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // W @ V
-              mma1_pa_n_fixed(Br, Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
-                              KV_Head, dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            // Scale acc_o and cast store
-            scale_and_cast_copy(acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
-                                O + b_idx * seq_size_q * head_size * dim_size
-                                    + t_r_idx * Br * head_size * dim_size
-                                    + this_thread_head * dim_size,
-                                t_r_idx, head_size, dim_size);
+            // W @ V
+            mma1(acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, KV_Head, dim_size, t_r_idx,
+                 t_c_idx, seq_size_q, seq_size_k, causal_mask);
           }
 
-          // Process left Q
-          if (Tr_left) {
-            // Init all temps
-            init_temp(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
-                      acc_o_ + thread_id * Br * dim_size, dim_size);
+          // Process the last block of KV
+          if (Tc_left) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
+                                    + t_r_idx * Br * Q_Head * dim_size
+                                    + this_thread_head_q * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
+                                    + Tc * Bc * KV_Head * dim_size + this_thread_head_kv * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
+                                    + Tc * Bc * KV_Head * dim_size + this_thread_head_kv * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
 
-            // Loop S_KV
-            for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
-                                      + Tr * Br * Q_Head * dim_size + this_thread_head_q * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
-                                      + t_c_idx * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
-                                      + t_c_idx * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-              // Q @ K^T
-              mma0_pa_n_fixed(Tr_left, Bc, tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size,
-                              KV_Head * dim_size, Tr, t_c_idx, seq_size_q, seq_size_k, causal_mask);
+            // Q @ K^T
+            mma0_pa_n_fixed(Br, Tc_left, tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size,
+                            KV_Head * dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
 
-              // Softmax
-              softmax_pa_n_fixed(Tr_left, Bc, acc_s_ + thread_id * Br * Bc,
-                                 acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
-                                 scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
-                                 score_sum_ + thread_id * Br, logsum_ + thread_id * Br, Tr, t_c_idx,
-                                 seq_size_q, seq_size_k, causal_mask);
+            // Softmax
+            softmax_pa_n_fixed(Br, Tc_left, acc_s_ + thread_id * Br * Bc,
+                               acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
+                               scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
+                               score_sum_ + thread_id * Br, logsum_ + thread_id * Br, t_r_idx, Tc,
+                               seq_size_q, seq_size_k, causal_mask);
 
-              // Rescale
-              rescale_pa_n_fixed(Tr_left, Bc, acc_o, score_scale_ + thread_id * Br, dim_size, Tr,
-                                 t_c_idx, seq_size_q, seq_size_k, causal_mask);
+            // Rescale
+            rescale_pa_n_fixed(Br, Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx,
+                               Tc, seq_size_q, seq_size_k, causal_mask);
 
-              // W @ V
-              mma1_pa_n_fixed(Tr_left, Bc, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
-                              KV_Head, dim_size, Tr, t_c_idx, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            // Process the last block of KV
-            if (Tc_left) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
-                                      + Tr * Br * Q_Head * dim_size + this_thread_head_q * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
-                                      + Tc * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
-                                      + Tc * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-
-              // Q @ K^T
-              mma0_pa_n_fixed(Tr_left, Tc_left, tile_q, tile_k, tile_acc_s, dim_size,
-                              Q_Head * dim_size, KV_Head * dim_size, Tr, Tc, seq_size_q, seq_size_k,
-                              causal_mask);
-
-              // Softmax
-              softmax_pa_n_fixed(Tr_left, Tc_left, acc_s_ + thread_id * Br * Bc,
-                                 acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
-                                 scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
-                                 score_sum_ + thread_id * Br, logsum_ + thread_id * Br, Tr, Tc,
-                                 seq_size_q, seq_size_k, causal_mask);
-
-              // Rescale
-              rescale_pa_n_fixed(Tr_left, Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size,
-                                 Tr, Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // W @ V
-              mma1_pa_n_fixed(Tr_left, Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
-                              KV_Head, dim_size, Tr, Tc, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            // Scale acc_o and cast store
-            scale_and_cast_copy_pa_n_fixed(
-                Tr_left, acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
-                O + b_idx * seq_size_q * head_size * dim_size + Tr * Br * head_size * dim_size
-                    + this_thread_head * dim_size,
-                Tr, head_size, dim_size);
+            // W @ V
+            mma1_pa_n_fixed(Br, Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, KV_Head,
+                            dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
           }
+
+          // Scale acc_o and cast store
+          scale_and_cast_copy(acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
+                              O + b_idx * seq_size_q * head_size * dim_size
+                                  + t_r_idx * Br * head_size * dim_size
+                                  + this_thread_head * dim_size,
+                              t_r_idx, head_size, dim_size);
+        }
+
+        // Process left Q
+        if (Tr_left) {
+          // Init all temps
+          init_temp(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
+                    acc_o_ + thread_id * Br * dim_size, dim_size);
+
+          // Loop S_KV
+          for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
+                                    + Tr * Br * Q_Head * dim_size + this_thread_head_q * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
+                                    + t_c_idx * Bc * KV_Head * dim_size
+                                    + this_thread_head_kv * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
+                                    + t_c_idx * Bc * KV_Head * dim_size
+                                    + this_thread_head_kv * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+            // Q @ K^T
+            mma0_pa_n_fixed(Tr_left, Bc, tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size,
+                            KV_Head * dim_size, Tr, t_c_idx, seq_size_q, seq_size_k, causal_mask);
+
+            // Softmax
+            softmax_pa_n_fixed(Tr_left, Bc, acc_s_ + thread_id * Br * Bc,
+                               acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
+                               scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
+                               score_sum_ + thread_id * Br, logsum_ + thread_id * Br, Tr, t_c_idx,
+                               seq_size_q, seq_size_k, causal_mask);
+
+            // Rescale
+            rescale_pa_n_fixed(Tr_left, Bc, acc_o, score_scale_ + thread_id * Br, dim_size, Tr,
+                               t_c_idx, seq_size_q, seq_size_k, causal_mask);
+
+            // W @ V
+            mma1_pa_n_fixed(Tr_left, Bc, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, KV_Head,
+                            dim_size, Tr, t_c_idx, seq_size_q, seq_size_k, causal_mask);
+          }
+
+          // Process the last block of KV
+          if (Tc_left) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
+                                    + Tr * Br * Q_Head * dim_size + this_thread_head_q * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
+                                    + Tc * Bc * KV_Head * dim_size + this_thread_head_kv * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
+                                    + Tc * Bc * KV_Head * dim_size + this_thread_head_kv * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+
+            // Q @ K^T
+            mma0_pa_n_fixed(Tr_left, Tc_left, tile_q, tile_k, tile_acc_s, dim_size,
+                            Q_Head * dim_size, KV_Head * dim_size, Tr, Tc, seq_size_q, seq_size_k,
+                            causal_mask);
+
+            // Softmax
+            softmax_pa_n_fixed(Tr_left, Tc_left, acc_s_ + thread_id * Br * Bc,
+                               acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
+                               scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
+                               score_sum_ + thread_id * Br, logsum_ + thread_id * Br, Tr, Tc,
+                               seq_size_q, seq_size_k, causal_mask);
+
+            // Rescale
+            rescale_pa_n_fixed(Tr_left, Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size, Tr,
+                               Tc, seq_size_q, seq_size_k, causal_mask);
+
+            // W @ V
+            mma1_pa_n_fixed(Tr_left, Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o,
+                            KV_Head, dim_size, Tr, Tc, seq_size_q, seq_size_k, causal_mask);
+          }
+
+          // Scale acc_o and cast store
+          scale_and_cast_copy_pa_n_fixed(
+              Tr_left, acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
+              O + b_idx * seq_size_q * head_size * dim_size + Tr * Br * head_size * dim_size
+                  + this_thread_head * dim_size,
+              Tr, head_size, dim_size);
         }
       }
     }
@@ -1651,92 +1633,89 @@ struct NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL {
     // Loops
     for (int32_t b_idx = 0; b_idx < batch_size; ++b_idx) {
       // FIXME: Make dynamic threads dispatching available in head_size level.
-      for (int32_t h_idx = 0; h_idx < head_size; h_idx += threads) {
-#pragma omp parallel for num_threads(threads) schedule(auto) if (threads > 1)
-        for (int thread_id = 0; thread_id < threads; ++thread_id) {
-          const int32_t this_thread_head = h_idx + thread_id;
-          const int32_t this_thread_head_q = this_thread_head;
-          const int32_t this_thread_head_kv = kv_head_index(this_thread_head_q);
+#pragma omp parallel for num_threads(threads) schedule(dynamic, 1) if (threads > 1)
+      for (int32_t h_idx = 0; h_idx < head_size; ++h_idx) {
+        const int32_t thread_id = omp_get_thread_num();
+        const int32_t this_thread_head = h_idx;
+        const int32_t this_thread_head_q = this_thread_head;
+        const int32_t this_thread_head_kv = kv_head_index(this_thread_head_q);
 
-          // Loop Q
-          for (int t_r_idx = 0; t_r_idx < Tr; ++t_r_idx) {
-            // Init all temps
-            init_temp_d(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
-                        acc_o_ + thread_id * Br * dim_size, dim_size);
+        // Loop Q
+        for (int t_r_idx = 0; t_r_idx < Tr; ++t_r_idx) {
+          // Init all temps
+          init_temp_d(logsum_ + thread_id * Br, scoremax_ + thread_id * Br,
+                      acc_o_ + thread_id * Br * dim_size, dim_size);
 
-            // Loop KV
-            for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
-                                      + t_r_idx * 1 * Q_Head * dim_size
-                                      + this_thread_head_q * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
-                                      + t_c_idx * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
-                                      + t_c_idx * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * 1 * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-              // Q @ K^T
-              mma0_d(tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size, KV_Head * dim_size,
-                     t_r_idx, t_c_idx, seq_size_q, seq_size_k, causal_mask);
+          // Loop KV
+          for (int t_c_idx = 0; t_c_idx < Tc; ++t_c_idx) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
+                                    + t_r_idx * 1 * Q_Head * dim_size
+                                    + this_thread_head_q * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
+                                    + t_c_idx * Bc * KV_Head * dim_size
+                                    + this_thread_head_kv * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
+                                    + t_c_idx * Bc * KV_Head * dim_size
+                                    + this_thread_head_kv * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * 1 * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+            // Q @ K^T
+            mma0_d(tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size, KV_Head * dim_size,
+                   t_r_idx, t_c_idx, seq_size_q, seq_size_k, causal_mask);
 
-              // Softmax
-              softmax_d(acc_s_ + thread_id * Br * Bc, acc_s_cast_ + thread_id * Br * Bc,
-                        scoremax_ + thread_id * Br, scoremax_prev_ + thread_id * Br,
-                        score_scale_ + thread_id * Br, score_sum_ + thread_id * Br,
-                        logsum_ + thread_id * Br, t_r_idx, t_c_idx, seq_size_q, seq_size_k,
-                        causal_mask);
+            // Softmax
+            softmax_d(acc_s_ + thread_id * Br * Bc, acc_s_cast_ + thread_id * Br * Bc,
+                      scoremax_ + thread_id * Br, scoremax_prev_ + thread_id * Br,
+                      score_scale_ + thread_id * Br, score_sum_ + thread_id * Br,
+                      logsum_ + thread_id * Br, t_r_idx, t_c_idx, seq_size_q, seq_size_k,
+                      causal_mask);
 
-              // Rescale
-              rescale_d(acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, t_c_idx,
-                        seq_size_q, seq_size_k, causal_mask);
+            // Rescale
+            rescale_d(acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, t_c_idx, seq_size_q,
+                      seq_size_k, causal_mask);
 
-              // W @ V
-              mma1_d(acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, KV_Head, dim_size, t_r_idx,
-                     t_c_idx, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            if (Tc_left) {
-              const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
-                                      + t_r_idx * Br * Q_Head * dim_size
-                                      + this_thread_head_q * dim_size;
-              const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
-                                      + Tc * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
-                                      + Tc * Bc * KV_Head * dim_size
-                                      + this_thread_head_kv * dim_size;
-              acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
-              acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
-
-              // Q @ K^T
-              mma0_d_n_fixed(Tc_left, tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size,
-                             KV_Head * dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // Softmax
-              softmax_d_n_fixed(Tc_left, acc_s_ + thread_id * Br * Bc,
-                                acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
-                                scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
-                                score_sum_ + thread_id * Br, logsum_ + thread_id * Br, t_r_idx, Tc,
-                                seq_size_q, seq_size_k, causal_mask);
-
-              // Rescale
-              rescale_d_n_fixed(Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx,
-                                Tc, seq_size_q, seq_size_k, causal_mask);
-
-              // W @ V
-              mma1_d_n_fixed(Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, KV_Head,
-                             dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
-            }
-
-            // Scale acc_o and cast store
-            scale_and_cast_copy_d(acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
-                                  O + b_idx * seq_size_q * head_size * dim_size
-                                      + t_r_idx * 1 * head_size * dim_size
-                                      + this_thread_head * dim_size,
-                                  t_r_idx, head_size, dim_size);
+            // W @ V
+            mma1_d(acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, KV_Head, dim_size, t_r_idx,
+                   t_c_idx, seq_size_q, seq_size_k, causal_mask);
           }
+
+          if (Tc_left) {
+            const dtype_t* tile_q = Q + b_idx * seq_size_q * Q_Head * dim_size
+                                    + t_r_idx * Br * Q_Head * dim_size
+                                    + this_thread_head_q * dim_size;
+            const dtype_t* tile_k = K + b_idx * seq_size_k * KV_Head * dim_size
+                                    + Tc * Bc * KV_Head * dim_size + this_thread_head_kv * dim_size;
+            const dtype_t* tile_v = V + b_idx * seq_size_k * KV_Head * dim_size
+                                    + Tc * Bc * KV_Head * dim_size + this_thread_head_kv * dim_size;
+            acc_dtype_t* tile_acc_s = acc_s_ + thread_id * Br * Bc;
+            acc_dtype_t* acc_o = acc_o_ + thread_id * Br * dim_size;
+
+            // Q @ K^T
+            mma0_d_n_fixed(Tc_left, tile_q, tile_k, tile_acc_s, dim_size, Q_Head * dim_size,
+                           KV_Head * dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
+
+            // Softmax
+            softmax_d_n_fixed(Tc_left, acc_s_ + thread_id * Br * Bc,
+                              acc_s_cast_ + thread_id * Br * Bc, scoremax_ + thread_id * Br,
+                              scoremax_prev_ + thread_id * Br, score_scale_ + thread_id * Br,
+                              score_sum_ + thread_id * Br, logsum_ + thread_id * Br, t_r_idx, Tc,
+                              seq_size_q, seq_size_k, causal_mask);
+
+            // Rescale
+            rescale_d_n_fixed(Tc_left, acc_o, score_scale_ + thread_id * Br, dim_size, t_r_idx, Tc,
+                              seq_size_q, seq_size_k, causal_mask);
+
+            // W @ V
+            mma1_d_n_fixed(Tc_left, acc_s_cast_ + thread_id * Br * Bc, tile_v, acc_o, KV_Head,
+                           dim_size, t_r_idx, Tc, seq_size_q, seq_size_k, causal_mask);
+          }
+
+          // Scale acc_o and cast store
+          scale_and_cast_copy_d(acc_o_ + thread_id * Br * dim_size, logsum_ + thread_id * Br,
+                                O + b_idx * seq_size_q * head_size * dim_size
+                                    + t_r_idx * 1 * head_size * dim_size
+                                    + this_thread_head * dim_size,
+                                t_r_idx, head_size, dim_size);
         }
       }
     }
