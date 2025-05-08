@@ -9,6 +9,16 @@ Mobile Attention(MobiAttn) is a head-only library designed for transformer-based
     - ​​Multi-Head & Grouped-Query Attention​​
     - Arm Neon SIMD optimizations with OpenMP parallelization for mobile CPUs
 
+## Benchmark Summary
+
+### Arm Neon Flash Attention 2
+
+The benchmark is run on 8gen1+ device with 4 threads.
+
+![250508_prefill_8gen1p_threads4](assets/250508_prefill_8gen1p_threads4.png)
+
+![250508_decode_8gen1p_threads4](assets/250508_decode_8gen1p_threads4.png)
+
 ## How to use?
 
 MobiAttn is a header-only library. Using MobiAttn is straightforward - we provide a simple build script to help you compile examples, test cases, and benchmark applications.
