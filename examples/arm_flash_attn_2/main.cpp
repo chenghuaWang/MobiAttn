@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <chrono>
 #include <arm_neon.h>
+#include "mobi_attn/flash_attn_2/driver.hpp"
 #include "mobi_attn/flash_attn_2/arm_qkv_fp16_o_fp16_fa2.hpp"
 
 using namespace mobi_attn;
@@ -40,8 +41,8 @@ int main() {
   constexpr int32_t threads = 2;
   constexpr bool high_precession_exp = false;
 
-  using FlashAttnOp = FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<
-      Br, Bc, Q_Head, KV_Head, threads, high_precession_exp>>;
+  using FlashAttnOp = FlashAttn2<
+      NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<Br, Bc, threads, high_precession_exp>>;
 
   FlashAttnOp::dtype_t *Q_h, *K_h, *V_h, *O_h;
   void* acc_s_cast;
@@ -78,7 +79,7 @@ int main() {
       (FlashAttnOp::acc_dtype_t*)score_scale, (FlashAttnOp::acc_dtype_t*)score_sum);
 
   auto start = std::chrono::high_resolution_clock::now();
-  fa_op(Q_h, K_h, V_h, O_h, B, Q_Head, S_Q, S_K, D, true);
+  fa_op(Q_h, K_h, V_h, O_h, B, Q_Head, KV_Head, S_Q, S_K, D);
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> duration = end - start;
   std::cout << duration.count() << "ms" << std::endl;

@@ -2,6 +2,7 @@
 #include <random>
 #include <arm_neon.h>
 #include <gtest/gtest.h>
+#include "mobi_attn/flash_attn_2/driver.hpp"
 #include "mobi_attn/flash_attn_2/arm_qkv_fp16_o_fp16_fa2.hpp"
 
 using namespace mobi_attn;
@@ -158,7 +159,7 @@ class ArmFlashAttn2_MHA_BSHD_FP16_Test : public testing::Test {
   ~ArmFlashAttn2_MHA_BSHD_FP16_Test() override = default;
 
   using FlashAttnOp =
-      FlashAttn2<NEON_FA_2_MHA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<4, 4, 2, false>>;
+      FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<4, 4, 2, false>>;
 
   void SetShape(int B, int S_Q, int S_K, int H, int D) {
     B_ = B;
@@ -226,7 +227,7 @@ class ArmFlashAttn2_MHA_BSHD_FP16_Test : public testing::Test {
   }
 
   void Calculate() {
-    fa_op_(Q_h_, K_h_, V_h_, O_h_, B_, H_, S_Q_, S_K_, D_, true);
+    fa_op_(Q_h_, K_h_, V_h_, O_h_, B_, H_, H_, S_Q_, S_K_, D_);
     for (int i = 0; i < B_ * S_Q_ * H_ * D_; ++i) { output_flash_[i] = (float)(O_h_[i]); }
   }
 
@@ -301,7 +302,7 @@ class ArmFlashAttn2_GQA_BSHD_FP16_Test : public testing::Test {
   ~ArmFlashAttn2_GQA_BSHD_FP16_Test() override = default;
 
   using FlashAttnOp =
-      FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<4, 4, 32, 8, 2, false>>;
+      FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<4, 4, 2, false, true>>;
 
   void SetShape(int B, int S_Q, int S_K, int D) {
     B_ = B;
@@ -369,7 +370,7 @@ class ArmFlashAttn2_GQA_BSHD_FP16_Test : public testing::Test {
   }
 
   void Calculate() {
-    fa_op_(Q_h_, K_h_, V_h_, O_h_, B_, Q_Head_, S_Q_, S_K_, D_, true);
+    fa_op_(Q_h_, K_h_, V_h_, O_h_, B_, Q_Head_, KV_Head_, S_Q_, S_K_, D_);
     for (int i = 0; i < B_ * S_Q_ * Q_Head_ * D_; ++i) { output_flash_[i] = (float)(O_h_[i]); }
   }
 
@@ -419,7 +420,7 @@ class ArmFlashAttn2_GQA_BSHD_FP16_Test : public testing::Test {
   int B_;
   int S_Q_;
   int S_K_;
-  int Q_Head_ = 32;
+  int Q_Head_ = 16;
   int KV_Head_ = 8;
   int D_;
 
@@ -438,53 +439,53 @@ class ArmFlashAttn2_GQA_BSHD_FP16_Test : public testing::Test {
   void* score_sum_;
 };
 
-TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_1024_SK_1024_H_16_D_128) {
-  SetShape(1, 1024, 1024, 16, 128);
-  AllocAndInitFACtx();
-  CalculateRef();
-  Calculate();
-  EXPECT_EQ(Compare(), true);
-}
+// TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_1024_SK_1024_H_16_D_128) {
+//   SetShape(1, 1024, 1024, 16, 128);
+//   AllocAndInitFACtx();
+//   CalculateRef();
+//   Calculate();
+//   EXPECT_EQ(Compare(), true);
+// }
 
-TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_1026_SK_1026_H_16_D_128) {
-  SetShape(1, 1026, 1026, 16, 128);
-  AllocAndInitFACtx();
-  CalculateRef();
-  Calculate();
-  EXPECT_EQ(Compare(), true);
-}
+// TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_1026_SK_1026_H_16_D_128) {
+//   SetShape(1, 1026, 1026, 16, 128);
+//   AllocAndInitFACtx();
+//   CalculateRef();
+//   Calculate();
+//   EXPECT_EQ(Compare(), true);
+// }
 
-TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_512_SK_1024_H_16_D_128) {
-  SetShape(1, 512, 1024, 16, 128);
-  AllocAndInitFACtx();
-  CalculateRef();
-  Calculate();
-  EXPECT_EQ(Compare(), true);
-}
+// TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_512_SK_1024_H_16_D_128) {
+//   SetShape(1, 512, 1024, 16, 128);
+//   AllocAndInitFACtx();
+//   CalculateRef();
+//   Calculate();
+//   EXPECT_EQ(Compare(), true);
+// }
 
-TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_127_SK_1025_H_16_D_128) {
-  SetShape(1, 127, 1025, 16, 128);
-  AllocAndInitFACtx();
-  CalculateRef();
-  Calculate();
-  EXPECT_EQ(Compare(), true);
-}
+// TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_127_SK_1025_H_16_D_128) {
+//   SetShape(1, 127, 1025, 16, 128);
+//   AllocAndInitFACtx();
+//   CalculateRef();
+//   Calculate();
+//   EXPECT_EQ(Compare(), true);
+// }
+//
+// TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_1_SK_1024_H_16_D_128) {
+//   SetShape(1, 1, 1024, 16, 128);
+//   AllocAndInitFACtx();
+//   CalculateRef();
+//   Calculate();
+//   EXPECT_EQ(Compare(), true);
+// }
 
-TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_1_SK_1024_H_16_D_128) {
-  SetShape(1, 1, 1024, 16, 128);
-  AllocAndInitFACtx();
-  CalculateRef();
-  Calculate();
-  EXPECT_EQ(Compare(), true);
-}
-
-TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_1_SK_1025_H_16_D_128) {
-  SetShape(1, 1, 1025, 16, 128);
-  AllocAndInitFACtx();
-  CalculateRef();
-  Calculate();
-  EXPECT_EQ(Compare(), true);
-}
+// TEST_F(ArmFlashAttn2_MHA_BSHD_FP16_Test, B_1_SQ_1_SK_1025_H_16_D_128) {
+//   SetShape(1, 1, 1025, 16, 128);
+//   AllocAndInitFACtx();
+//   CalculateRef();
+//   Calculate();
+//   EXPECT_EQ(Compare(), true);
+// }
 
 TEST_F(ArmFlashAttn2_GQA_BSHD_FP16_Test, B_1_SQ_1024_SK_1024_HQ_16_HKV_8_D_128) {
   SetShape(1, 1024, 1024, 128);

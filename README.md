@@ -13,11 +13,27 @@ Mobile Attention(MobiAttn) is a head-only library designed for transformer-based
 
 ### Arm Neon Flash Attention 2
 
-The benchmark is run on 8gen1+ device with 4 threads.
+The v-250508 benchmark is run on 8gen1+ device with 4 threads.
 
-![250508_prefill_8gen1p_threads4](assets/250508_prefill_8gen1p_threads4.png)
+<div style="display: flex;">
+    <div style="flex: 1;">
+        <img src="assets/250508_prefill_8gen1p_threads4.png" style="width: 100%; height: auto;">
+    </div>
+    <div style="flex: 1;">
+        <img src="assets/250508_decode_8gen1p_threads4.png" style="width: 100%; height: auto;">
+    </div>
+</div>
 
-![250508_decode_8gen1p_threads4](assets/250508_decode_8gen1p_threads4.png)
+The v-20250627 benchmark is run on 8elite device with 6 threads.
+
+<div style="display: flex;">
+    <div style="flex: 1;">
+        <img src="assets/250627_prefill_8elite_threads6.png" style="width: 100%; height: auto;">
+    </div>
+    <div style="flex: 1;">
+        <img src="assets/250627_decode_8elite_threads6.png" style="width: 100%; height: auto;">
+    </div>
+</div>
 
 ## How to use?
 

@@ -1,4 +1,5 @@
 #include <benchmark/benchmark.h>
+#include "mobi_attn/flash_attn_2/driver.hpp"
 #include "mobi_attn/flash_attn_2/arm_qkv_fp16_o_fp16_fa2.hpp"
 
 using namespace mobi_attn;
@@ -35,11 +36,11 @@ static void BSHD_FP16_GQA_PREFILL(benchmark::State& state) {
 
   constexpr int32_t Br = 4;
   constexpr int32_t Bc = 4;
-  constexpr int32_t threads = 4;
+  constexpr int32_t threads = 6;
   constexpr bool high_precession_exp = false;
 
-  using FlashAttnOp = FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<
-      Br, Bc, Q_Head, KV_Head, threads, high_precession_exp>>;
+  using FlashAttnOp = FlashAttn2<
+      NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<Br, Bc, threads, high_precession_exp>>;
 
   FlashAttnOp::dtype_t *Q_h, *K_h, *V_h, *O_h;
   void* acc_s_cast;
@@ -71,7 +72,7 @@ static void BSHD_FP16_GQA_PREFILL(benchmark::State& state) {
       (FlashAttnOp::acc_dtype_t*)scoremax, (FlashAttnOp::acc_dtype_t*)scoremax_prev,
       (FlashAttnOp::acc_dtype_t*)score_scale, (FlashAttnOp::acc_dtype_t*)score_sum);
 
-  for (auto _ : state) { fa_op(Q_h, K_h, V_h, O_h, B, Q_Head, S_Q, S_K, D, true); }
+  for (auto _ : state) { fa_op(Q_h, K_h, V_h, O_h, B, Q_Head, KV_Head, S_Q, S_K, D); }
 
   arm_align_free(Q_h);
   arm_align_free(K_h);
@@ -99,11 +100,11 @@ static void BSHD_FP16_GQA_DECODE(benchmark::State& state) {
 
   constexpr int32_t Br = 4;
   constexpr int32_t Bc = 4;
-  constexpr int32_t threads = 4;
+  constexpr int32_t threads = 6;
   constexpr bool high_precession_exp = false;
 
-  using FlashAttnOp = FlashAttn2<NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<
-      Br, Bc, Q_Head, KV_Head, threads, high_precession_exp>>;
+  using FlashAttnOp = FlashAttn2<
+      NEON_FA_2_GQA_QKV_FP16_BSHD_O_FP16_BSHD_ACC_FP32_IMPL<Br, Bc, threads, high_precession_exp>>;
 
   FlashAttnOp::dtype_t *Q_h, *K_h, *V_h, *O_h;
   void* acc_s_cast;
@@ -135,7 +136,7 @@ static void BSHD_FP16_GQA_DECODE(benchmark::State& state) {
       (FlashAttnOp::acc_dtype_t*)scoremax, (FlashAttnOp::acc_dtype_t*)scoremax_prev,
       (FlashAttnOp::acc_dtype_t*)score_scale, (FlashAttnOp::acc_dtype_t*)score_sum);
 
-  for (auto _ : state) { fa_op(Q_h, K_h, V_h, O_h, B, Q_Head, S_Q, S_K, D, true); }
+  for (auto _ : state) { fa_op(Q_h, K_h, V_h, O_h, B, Q_Head, KV_Head, S_Q, S_K, D); }
 
   arm_align_free(Q_h);
   arm_align_free(K_h);
